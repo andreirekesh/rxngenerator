@@ -1,8 +1,5 @@
 import sys
 sys.path.append('../rxnft_vae')
-import rdkit
-import rdkit.Chem as Chem
-from rdkit.Chem import QED, Descriptors, rdmolops
 
 import torch
 import torch.nn as nn
@@ -10,6 +7,7 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.utils.data import DataLoader
 from torch.autograd import Variable
+import subprocess
 
 import math, random, sys
 from optparse import OptionParser
@@ -24,11 +22,11 @@ from evaluate import Evaluator
 import random
 import numpy as np
 import networkx as nx
-
+from tdc import Oracle
 from sparse_gp import SparseGP
 import scipy.stats as sps
 import sascorer
-
+import pandas as pd
 
 def decode_many_times(model, latent):
 	prob_decode = True
@@ -48,6 +46,7 @@ def decode_many_times(model, latent):
 		return product_list
 
 def run_bo(X_train, y_train, X_test, y_test, model, parameters, metric, randseed):
+	oracle = Oracle(name="DRD2")
 	random_seed = int(randseed)
 	np.random.seed(random_seed)
 	if metric =="logp":
@@ -66,7 +65,7 @@ def run_bo(X_train, y_train, X_test, y_test, model, parameters, metric, randseed
 		iteration = 0
 		latents = []
 		min_scores = []
-		while iteration < 5:
+		while iteration < 100:
 			# fit the GP
 			#print("maxmimum score :", np.min(y_train), X_train.shape)
 			print(iteration)
@@ -115,6 +114,52 @@ def run_bo(X_train, y_train, X_test, y_test, model, parameters, metric, randseed
 			b_full_rxn_strs=[]
 			b_scores=[]
 			b_new_features=[]
+			if metric=="seh":
+				# Prepare all valid SMILES as a single string, each enclosed in single quotes and separated by spaces
+				all_smiles = ' '.join([f"'{smile}'" for smile in valid_smiles])
+				
+				try:
+					# Run the seh.py script with all SMILES at once
+					result = subprocess.run(f"./run_seh.sh {all_smiles}", capture_output=True, text=True, check=True, shell=True)
+					
+					# Split the output into individual scores
+					scores = [float(score) for score in result.stdout.strip().split()]
+					
+					# Negate scores and add to lists
+					for i, score in enumerate(scores):
+						with open("visited_seh.txt", 'a') as file:            # Write each molecule and its score to the file
+							file.write(f"{valid_smiles[i]}, {score}\n")	
+						b_scores.append(-score)
+						#b_valid_smiles.append(valid_smiles[i])
+						#b_full_rxn_strs.append(full_rxn_strs[i])
+						#b_new_features.append(new_features[i])
+				except subprocess.CalledProcessError as e:
+					print(f"Error running seh.py: {e}")
+					print(f"stderr: {e.stderr}")
+
+			if metric=="seno":
+				# Prepare all valid SMILES as a single string, each enclosed in single quotes and separated by spaces
+				all_smiles = ' '.join([f"'{smile}'" for smile in valid_smiles])
+				
+				try:
+					# Run the seh.py script with all SMILES at once
+					result = subprocess.run(f"./run_seno.sh {all_smiles}", capture_output=True, text=True, check=True, shell=True)
+					
+					# Split the output into individual scores
+					scores = [float(score) for score in result.stdout.strip().split()]
+					
+					# Negate scores and add to lists
+					for i, score in enumerate(scores):
+						with open("visited_seno.txt", 'a') as file:            # Write each molecule and its score to the file
+							file.write(f"{valid_smiles[i]}, {score}\n")	
+						b_scores.append(-score)
+						#b_valid_smiles.append(valid_smiles[i])
+						#b_full_rxn_strs.append(full_rxn_strs[i])
+						#b_new_features.append(new_features[i])
+				except subprocess.CalledProcessError as e:
+					print(f"Error running seno.py: {e}")
+					print(f"stderr: {e.stderr}")
+
 			for i in range(len(valid_smiles)):
 				if metric =="logp":
 					mol = rdkit.Chem.MolFromSmiles(valid_smiles[i])
@@ -140,6 +185,7 @@ def run_bo(X_train, y_train, X_test, y_test, model, parameters, metric, randseed
 					b_valid_smiles.append(valid_smiles[i])
 					b_full_rxn_strs.append(full_rxn_strs[i])
 					b_new_features.append(new_features[i])
+
 				if metric=="qed":
 					mol = rdkit.Chem.MolFromSmiles(valid_smiles[i])
 					if mol!=None:
@@ -148,8 +194,29 @@ def run_bo(X_train, y_train, X_test, y_test, model, parameters, metric, randseed
 						b_valid_smiles.append(valid_smiles[i])
 						b_full_rxn_strs.append(full_rxn_strs[i])
 						b_new_features.append(new_features[i])
+						
+				if metric=="drd2":
+					score = oracle(valid_smiles[i])
+					scores.append(-score)
+					b_valid_smiles.append(valid_smiles[i])
+					b_full_rxn_strs.append(full_rxn_strs[i])
+					b_new_features.append(new_features[i])
+					with open("visited_drd2.txt", 'a') as file:            # Write each molecule and its score to the file
+						file.write(f"{valid_smiles[i]}, {score}\n")		
+
+				if metric=="seh":
+					b_valid_smiles.append(valid_smiles[i])
+					b_full_rxn_strs.append(full_rxn_strs[i])
+					b_new_features.append(new_features[i])
+
+				if metric=="seno":
+					b_valid_smiles.append(valid_smiles[i])
+					b_full_rxn_strs.append(full_rxn_strs[i])
+					b_new_features.append(new_features[i])
+
 			new_features = np.vstack(b_new_features)
 			if len(new_features) > 0:
+				print("Updating X_train and y_train....")
 				X_train = np.concatenate([ X_train, new_features ], 0)
 				y_train = np.concatenate([ y_train, np.array(scores)[ :, None ] ], 0)
 			iteration+=1
@@ -184,11 +251,12 @@ metric = opts.metric
 seed = int(opts.seed)
 
 
+
 # load model
 if torch.cuda.is_available():
 	#device = torch.device("cuda:1")
 	device = torch.device("cuda")
-	torch.cuda.set_device(1)
+	torch.cuda.set_device(0)
 else:
 	device = torch.device("cpu")
 
@@ -270,6 +338,67 @@ if metric =="logp":
 		rxn_tree = data_pair[1]
 		smiles = rxn_tree.molecule_nodes[0].smiles
 		score_list.append(get_clogp_score(smiles, logp_m, logp_s, sascore_m, sascore_s, cycle_m, cycle_s))
+if metric=="drd2":
+	oracle = Oracle(name="DRD2")
+	for i, data_pair in enumerate(data_pairs):
+		latent = model.encode([data_pair])
+		#print(i, latent.size(), latent)
+		latent_list.append(latent[0])
+		rxn_tree = data_pair[1]
+		smiles = rxn_tree.molecule_nodes[0].smiles
+		score = oracle(smiles)
+		score_list.append(score)
+		#with open("visited_drd2.txt", 'a') as file:            # Write each molecule and its score to the file
+		#	file.write(f"{smiles}, {score}\n")	
+if metric=="seh":
+	for i, data_pair in enumerate(data_pairs):
+		latent = model.encode([data_pair])
+		#print(i, latent.size(), latent)
+		latent_list.append(latent[0])
+		rxn_tree = data_pair[1]
+		smiles = rxn_tree.molecule_nodes[0].smiles
+		seno_results = pd.read_csv('seno_results.csv')
+		
+		# Find the corresponding score for the current SMILES
+		score = seno_results.loc[seno_results['SMILES'] == smiles, 'SEH_Score'].values
+		
+		# If a matching SMILES is found, append its score; otherwise, append NaN
+		if len(score) > 0:
+			if i % 1000 == 0:
+				print(f"Processing molecule {i}")
+				print(len(score), score)
+			score_list.append(float(score[0]))
+		else:
+			print(f"No score found for SMILES: {smiles}")
+			score_list.append(0)
+
+if metric=="seno":
+	for i, data_pair in enumerate(data_pairs):
+		latent = model.encode([data_pair])
+		#print(i, latent.size(), latent)
+		latent_list.append(latent[0])
+		rxn_tree = data_pair[1]
+		smiles = rxn_tree.molecule_nodes[0].smiles
+		# Load Seno scores from CSV file
+		seno_results = pd.read_csv('seno_results.csv')
+		
+		# Find the corresponding score for the current SMILES
+		score = seno_results.loc[seno_results['SMILES'] == smiles, 'Seno_Score'].values
+		
+		# If a matching SMILES is found, append its score; otherwise, append NaN
+		if len(score) > 0:
+			if i % 1000 == 0:
+				print(f"Processing molecule {i}")
+				print(len(score), score)
+			score_list.append(float(score[0]))
+		else:
+			print(f"No score found for SMILES: {smiles}")
+			score_list.append(0)
+		
+		#with open("visited_drd2.txt", 'a') as file:            # Write each molecule and its score to the file
+		#	file.write(f"{smiles}, {score}\n")	
+
+
 latents = torch.stack(latent_list, dim=0)
 scores = np.array(score_list)
 scores = scores.reshape((-1,1))
